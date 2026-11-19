@@ -1,0 +1,174 @@
+package com.icehome.up;
+
+import android.content.ContentProvider;
+import android.content.ContentValues;
+import android.content.SharedPreferences;
+import android.database.Cursor;
+import android.database.MatrixCursor;
+import android.net.Uri;
+
+import java.util.Map;
+
+/**
+ * Expone los ajustes de la app (SharedPreferences), solo lectura, al launcher y a la interfaz del
+ * sistema, y recibe de ellos las líneas del registro ({@code /log}) para verlas y copiarlas.
+ */
+public class PrefsProvider extends ContentProvider {
+
+    public static final String AUTHORITY = "com.icehome.up.prefs";
+    public static final Uri URI = Uri.parse("content://" + AUTHORITY + "/tune");
+    public static final Uri LOG = Uri.parse("content://" + AUTHORITY + "/log");
+    /** Estado que publican los procesos enganchados (p. ej. modo seguro del escritorio). */
+    public static final Uri STATE = Uri.parse("content://" + AUTHORITY + "/state");
+    private static final String STATE_PREFS = "state";
+    public static final String PREFS = "tune";
+    private static final String LOG_FILE = "registro.txt";
+    private static final int LOG_KEEP = 120;
+    private final java.util.ArrayDeque<String> log = new java.util.ArrayDeque<>();
+    private boolean logLoaded;
+
+    @Override
+    public boolean onCreate() {
+        return true;
+    }
+
+    /**
+     * Paquetes que pueden leer los ajustes: los procesos enganchados (launcher, interfaz del
+     * sistema y su plugin, app de capturas). La propia app también, claro.
+     */
+    private static final java.util.Set<String> READERS = new java.util.HashSet<>(java.util.Arrays.asList(
+            Launchers.ONEUI, Launchers.HYPEROS, Launchers.POCO, "com.android.systemui", "miui.systemui.plugin", "com.miui.screenshot", "com.samsung.android.app.smartcapture"));
+
+    /**
+     * ¿Puede leer quien llama? El proveedor tiene que estar exportado (lo leen otros procesos),
+     * pero eso dejaba que CUALQUIER app leyera los ajustes, el registro y, sobre todo, la lista de
+     * apps sin genio, que dice qué apps tienes instaladas (por eso no va en los códigos HS1:).
+     *
+     * <p>Se mira el UID (el usuario de Linux de la app que llama), no el nombre de paquete que dice
+     * traer: el UID lo pone el sistema y no se puede falsificar. Pasan la propia app, los procesos
+     * del sistema (UID por debajo de 10000: system_server, shell…, que ya pueden leerlo todo) y
+     * las apps de {@link #READERS}. Si algo falla al comprobarlo, no se deja leer: el proceso
+     * enganchado usaría los valores por defecto, nunca se rompe nada.
+     */
+    private String verifiedCallerPackage() {
+        int uid = android.os.Binder.getCallingUid();
+        try {
+            String[] pkgs = getContext().getPackageManager().getPackagesForUid(uid);
+            if (pkgs != null) {
+                for (String p : pkgs) {
+                    if (READERS.contains(p)) return p;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    private boolean trusted() {
+        int uid = android.os.Binder.getCallingUid();
+        if (uid == android.os.Process.myUid() || uid < android.os.Process.FIRST_APPLICATION_UID) return true;
+        try {
+            String[] pkgs = getContext().getPackageManager().getPackagesForUid(uid);
+            if (pkgs != null) {
+                for (String p : pkgs) if (READERS.contains(p)) return true;
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    @Override
+    public Cursor query(Uri uri, String[] projection, String selection, String[] args, String sort) {
+        if (!trusted()) return new MatrixCursor(new String[]{"key", "value"});
+        if ("state".equals(uri.getLastPathSegment())) {
+            MatrixCursor c = new MatrixCursor(new String[]{"key", "value"});
+            for (Map.Entry<String, ?> e : getContext().getSharedPreferences(STATE_PREFS, 0).getAll().entrySet()) {
+                c.addRow(new Object[]{e.getKey(), String.valueOf(e.getValue())});
+            }
+            return c;
+        }
+        if ("log".equals(uri.getLastPathSegment())) {
+            MatrixCursor c = new MatrixCursor(new String[]{"line"});
+            synchronized (log) {
+                loadLog();
+                for (String l : log) c.addRow(new Object[]{l});
+            }
+            return c;
+        }
+        MatrixCursor c = new MatrixCursor(new String[]{"key", "value"});
+        SharedPreferences p = getContext().getSharedPreferences(PREFS, 0);
+        for (Map.Entry<String, ?> e : p.getAll().entrySet()) c.addRow(new Object[]{e.getKey(), String.valueOf(e.getValue())});
+        return c;
+    }
+
+    @Override
+    public String getType(Uri uri) {
+        return null;
+    }
+
+    @Override
+    public Uri insert(Uri uri, ContentValues v) {
+        // Verify caller identity via kernel UID rather than spoofable callingPackage string.
+        String from = verifiedCallerPackage();
+        boolean launcher = Launchers.is(from), sysui = "com.android.systemui".equals(from);
+        boolean shot = "com.miui.screenshot".equals(from) || "com.samsung.android.app.smartcapture".equals(from);
+        if (v == null || !(launcher || sysui || shot)) return null;
+        if ("state".equals(uri.getLastPathSegment())) {
+            String k = v.getAsString("key"), val = v.getAsString("value");
+            if (k == null || k.length() > 64) return null;
+            if (shot && !"shot_seen".equals(k)) return null;
+            getContext().getSharedPreferences(STATE_PREFS, 0).edit().putString(k, val).apply();
+            return uri;
+        }
+        if (shot || !"log".equals(uri.getLastPathSegment())) return null;
+        String line = v.getAsString("line");
+        if (line == null) return null;
+        line = (launcher ? "[inicio] " : "[sistema] ") + line;
+        synchronized (log) {
+            loadLog();
+            log.addLast(line.length() > 400 ? line.substring(0, 400) : line);
+            while (log.size() > LOG_KEEP) log.removeFirst();
+            saveLog();
+        }
+        return uri;
+    }
+
+    @Override
+    public int delete(Uri uri, String s, String[] a) {
+        // Borrar el registro solo desde la propia app («Acerca de → Registro → Borrar»).
+        if (android.os.Binder.getCallingUid() != android.os.Process.myUid()) return 0;
+        if (!"log".equals(uri.getLastPathSegment())) return 0;
+        synchronized (log) {
+            int n = log.size();
+            log.clear();
+            logLoaded = true;
+            saveLog();
+            return n;
+        }
+    }
+
+    private void loadLog() {
+        if (logLoaded) return;
+        logLoaded = true;
+        java.io.File f = new java.io.File(getContext().getFilesDir(), LOG_FILE);
+        if (!f.exists()) return;
+        try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(f))) {
+            for (String l; (l = r.readLine()) != null; ) log.addLast(l);
+        } catch (java.io.IOException ignored) {
+        }
+        while (log.size() > LOG_KEEP) log.removeFirst();
+    }
+
+    private void saveLog() {
+        java.io.File f = new java.io.File(getContext().getFilesDir(), LOG_FILE);
+        try (java.io.FileWriter w = new java.io.FileWriter(f)) {
+            for (String l : log) w.write(l + "\n");
+        } catch (java.io.IOException ignored) {
+        }
+    }
+
+    @Override
+    public int update(Uri uri, ContentValues v, String s, String[] a) {
+        return 0;
+    }
+}

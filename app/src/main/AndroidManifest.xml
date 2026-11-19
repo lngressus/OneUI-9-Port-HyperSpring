@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <permission
+        android:name="com.icehome.up.permission.CONTROL"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="com.icehome.up.permission.CONTROL" />
+    <!-- Buscar y descargar actualizaciones desde GitHub (solo api.github.com y sus descargas). -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Pasar la actualización descargada al instalador del sistema (que pide confirmación). -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Módulos antiguos (para avisar) y apps que se modifican (para la tarjeta de compatibilidad). -->
+    <queries>
+        <package android:name="com.telon.fx" />
+        <package android:name="com.kashiplus.tweaks" />
+        <package android:name="com.sec.android.app.launcher" />
+        <package android:name="com.samsung.android.app.smartcapture" />
+        <package android:name="com.miui.home" />
+        <package android:name="com.mi.android.globallauncher" />
+        <package android:name="com.android.systemui" />
+        <package android:name="miui.systemui.plugin" />
+        <package android:name="com.miui.screenshot" />
+        <!-- Las apps del cajón (las que tienen icono), para elegir cuáles van sin genio.
+             Solo esas: no hace falta el permiso de ver todas las apps instaladas. -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:allowBackup="false"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+        <provider
+            android:name="com.icehome.up.PrefsProvider"
+            android:authorities="com.icehome.up.prefs"
+            android:exported="true" />
+
+        <activity
+            android:name="com.icehome.up.SettingsActivity"
+            android:enableOnBackInvokedCallback="true"
+            android:exported="true">
+            <!-- enableOnBackInvokedCallback: activa el «atrás predictivo». El gesto avisa a la app
+                 de cada movimiento del dedo y la página lo sigue (PredictiveBack.java). -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="de.robv.android.xposed.category.MODULE_SETTINGS" />
+            </intent-filter>
+            <!-- Mantener pulsado el tile de los ajustes rápidos abre la app. -->
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
+            </intent-filter>
+        </activity>
+
+        <!-- Tile de los ajustes rápidos: pausar y reanudar HyperSpring (PauseTile.java). -->
+        <service
+            android:name="com.icehome.up.PauseTile"
+            android:exported="true"
+            android:icon="@drawable/ic_tile"
+            android:label="HyperSpring"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+            <meta-data android:name="android.service.quicksettings.TOGGLEABLE_TILE" android:value="true" />
+        </service>
+
+        <meta-data android:name="xposedmodule" android:value="true" />
+        <meta-data android:name="xposeddescription" android:value="@string/xposed_description" />
+        <meta-data android:name="xposedminversion" android:value="93" />
+        <meta-data android:name="xposedscope" android:resource="@array/xposed_scope" />
+    </application>
+</manifest>
