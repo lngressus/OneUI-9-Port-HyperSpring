@@ -58,53 +58,90 @@ jobs:
           pip install --quiet skia-python
           cp local-build/agsl_check.py "$TOOLS/agsl_check.py"
 
-      # Временный патч: делает Log и Tune доступными из подпакета compat
+      # Временный патч исходников перед сборкой.
+      # Делает Log и Tune public, делает on() и f() public,
       # и добавляет недостающую перегрузку f(Context, String, float).
       - name: Patch source access modifiers
         run: |
           python3 << 'PYEOF'
           import re
 
-          # --- Log.java: public class Log ---
+          def ensure_public_class(content, class_name):
+              # Убираем существующий модификатор доступа перед объявлением класса
+              content = re.sub(
+                  r'\b(?:public|private|protected)\s+'
+                  r'(?=(?:(?:final|abstract|static)\s+)*class\s+' + class_name + r'\b)',
+                  '', content, count=1
+              )
+              # Добавляем public перед объявлением класса
+              content = re.sub(
+                  r'\b(?=(?:(?:final|abstract|static)\s+)*class\s+' + class_name + r'\b)',
+                  'public ', content, count=1
+              )
+              return content
+
+          def ensure_public_static_method(content, sig):
+              # Убираем существующий модификатор доступа перед сигнатурой метода
+              content = re.sub(
+                  r'\b(?:public|private|protected)\s+(?=' + sig + r')',
+                  '', content
+              )
+              # Добавляем public перед сигнатурой метода
+              content = re.sub(
+                  r'\b(?=' + sig + r')',
+                  'public ', content
+              )
+              return content
+
+          # --- Log.java ---
           log_path = 'app/src/main/java/com/icehome/up/Log.java'
-          with open(log_path, 'r') as f:
+          with open(log_path, 'r', encoding='utf-8') as f:
               content = f.read()
-          content = re.sub(r'^(\s*)class\s+Log\b', r'\1public class Log', content, flags=re.MULTILINE)
-          with open(log_path, 'w') as f:
+          content = ensure_public_class(content, 'Log')
+          with open(log_path, 'w', encoding='utf-8') as f:
               f.write(content)
-          print(f'Patched {log_path}')
+          print('Patched', log_path)
 
-          # --- Tune.java: public class Tune, public on(), public f(), + f(ctx,k,def) ---
+          # --- Tune.java ---
           tune_path = 'app/src/main/java/com/icehome/up/Tune.java'
-          with open(tune_path, 'r') as f:
+          with open(tune_path, 'r', encoding='utf-8') as f:
               content = f.read()
 
-          content = re.sub(r'^(\s*)class\s+Tune\b', r'\1public class Tune', content, flags=re.MULTILINE)
-          content = re.sub(r'(\s)(?:public\s+)?static\s+boolean\s+on\s*\(', r'\1public static boolean on(', content)
-          content = re.sub(r'(\s)(?:public\s+)?static\s+float\s+f\s*\(', r'\1public static float f(', content)
+          content = ensure_public_class(content, 'Tune')
 
-          # Добавить перегрузку f(Context,String,float), если её нет
-          if ', float ' not in content and ',float ' not in content:
+          # Добавить перегрузку f(Context, String, float), если её ещё нет
+          has_3arg = re.search(
+              r'static\s+(?:final\s+)?float\s+f\s*\(\s*Context\s+\w+\s*,\s*String\s+\w+\s*,\s*float\s+',
+              content
+          )
+          if not has_3arg:
               lines = content.split('\n')
               insert_at = len(lines)
               for i in range(len(lines) - 1, -1, -1):
                   if lines[i].strip() == '}' and not lines[i].startswith(' '):
                       insert_at = i
                       break
-              overload = [
+              lines[insert_at:insert_at] = [
                   '',
                   '    public static float f(Context c, String k, float defaultValue) {',
                   '        return f(c, k);',
                   '    }',
               ]
-              lines[insert_at:insert_at] = overload
               content = '\n'.join(lines)
               print('Added f(Context, String, float) overload')
 
-          with open(tune_path, 'w') as f:
+          # Делаем on() и f() публичными
+          content = ensure_public_static_method(content, r'static\s+(?:final\s+)?boolean\s+on\s*\(')
+          content = ensure_public_static_method(content, r'static\s+(?:final\s+)?float\s+f\s*\(')
+
+          with open(tune_path, 'w', encoding='utf-8') as f:
               f.write(content)
-          print(f'Patched {tune_path}')
+          print('Patched', tune_path)
           PYEOF
+
+          echo "=== Diff after patch ==="
+          git --no-pager diff --stat
+          git --no-pager diff | head -200
 
       - name: Build
         run: bash local-build/build.sh
