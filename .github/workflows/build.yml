@@ -58,38 +58,42 @@ jobs:
           pip install --quiet skia-python
           cp local-build/agsl_check.py "$TOOLS/agsl_check.py"
 
-      # Временный патч исходников перед сборкой.
-      # Делает Log и Tune public, делает on() и f() public,
-      # и добавляет недостающую перегрузку f(Context, String, float).
+      # Устойчивый патч исходников перед сборкой.
+      # Делает Log и Tune public, все static-методы Log — public,
+      # on()/f() в Tune — public, и добавляет f(Context, String, float).
       - name: Patch source access modifiers
         run: |
           python3 << 'PYEOF'
-          import re
+          import re, sys
 
-          def ensure_public_class(content, class_name):
-              # Убираем существующий модификатор доступа перед объявлением класса
+          def looks_like_method_decl(line):
+              s = line.lstrip()
+              if s.startswith('//') or s.startswith('*'):
+                  return False
+              if 'static' not in line or '(' not in line:
+                  return False
+              return True
+
+          def make_public_static_line(line):
+              # Удаляем private/protected
+              line = re.sub(r'\b(?:private|protected)\b\s*', '', line)
+              # Если public уже стоит до static — ничего не делаем
+              sp = line.find('static')
+              pp = line.find('public')
+              if pp != -1 and pp < sp:
+                  return line
+              # Иначе вставляем public перед первым static
+              return line.replace('static', 'public static', 1)
+
+          def make_public_class(content, class_name):
               content = re.sub(
                   r'\b(?:public|private|protected)\s+'
                   r'(?=(?:(?:final|abstract|static)\s+)*class\s+' + class_name + r'\b)',
                   '', content, count=1
               )
-              # Добавляем public перед объявлением класса
               content = re.sub(
                   r'\b(?=(?:(?:final|abstract|static)\s+)*class\s+' + class_name + r'\b)',
                   'public ', content, count=1
-              )
-              return content
-
-          def ensure_public_static_method(content, sig):
-              # Убираем существующий модификатор доступа перед сигнатурой метода
-              content = re.sub(
-                  r'\b(?:public|private|protected)\s+(?=' + sig + r')',
-                  '', content
-              )
-              # Добавляем public перед сигнатурой метода
-              content = re.sub(
-                  r'\b(?=' + sig + r')',
-                  'public ', content
               )
               return content
 
@@ -97,19 +101,23 @@ jobs:
           log_path = 'app/src/main/java/com/icehome/up/Log.java'
           with open(log_path, 'r', encoding='utf-8') as f:
               content = f.read()
-          content = ensure_public_class(content, 'Log')
+          content = make_public_class(content, 'Log')
+          out = []
+          for line in content.split('\n'):
+              if looks_like_method_decl(line):
+                  line = make_public_static_line(line)
+              out.append(line)
           with open(log_path, 'w', encoding='utf-8') as f:
-              f.write(content)
+              f.write('\n'.join(out))
           print('Patched', log_path)
 
           # --- Tune.java ---
           tune_path = 'app/src/main/java/com/icehome/up/Tune.java'
           with open(tune_path, 'r', encoding='utf-8') as f:
               content = f.read()
+          content = make_public_class(content, 'Tune')
 
-          content = ensure_public_class(content, 'Tune')
-
-          # Добавить перегрузку f(Context, String, float), если её ещё нет
+          # Добавить перегрузку f(Context, String, float), если её нет
           has_3arg = re.search(
               r'static\s+(?:final\s+)?float\s+f\s*\(\s*Context\s+\w+\s*,\s*String\s+\w+\s*,\s*float\s+',
               content
@@ -128,20 +136,40 @@ jobs:
                   '    }',
               ]
               content = '\n'.join(lines)
-              print('Added f(Context, String, float) overload')
+              print('Added f(Context, String, float) overload in Tune')
 
-          # Делаем on() и f() публичными
-          content = ensure_public_static_method(content, r'static\s+(?:final\s+)?boolean\s+on\s*\(')
-          content = ensure_public_static_method(content, r'static\s+(?:final\s+)?float\s+f\s*\(')
+          # Делаем public static-методы on(...) и f(...)
+          out = []
+          for line in content.split('\n'):
+              if looks_like_method_decl(line):
+                  if re.search(r'\bstatic\b[^(]*\bon\s*\(', line) or \
+                     re.search(r'\bstatic\b[^(]*\bf\s*\(', line):
+                      line = make_public_static_line(line)
+              out.append(line)
+          content = '\n'.join(out)
 
           with open(tune_path, 'w', encoding='utf-8') as f:
               f.write(content)
           print('Patched', tune_path)
+
+          # Санити-проверка: не осталось ли голых "private static on(" или "static on(" без public
+          bad = []
+          for path in [log_path, tune_path]:
+              with open(path, 'r', encoding='utf-8') as f:
+                  for i, l in enumerate(f, 1):
+                      if re.search(r'(?:^|\s)(?:private|protected)\s+static\b', l):
+                          bad.append(f'{path}:{i}: {l.strip()}')
+          if bad:
+              print('WARNING: leftover private/protected static:')
+              for b in bad:
+                  print(' ', b)
+          else:
+              print('Sanity check OK: no leftover private/protected static in Log.java, Tune.java')
           PYEOF
 
           echo "=== Diff after patch ==="
           git --no-pager diff --stat
-          git --no-pager diff | head -200
+          git --no-pager diff
 
       - name: Build
         run: bash local-build/build.sh
