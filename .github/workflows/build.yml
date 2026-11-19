@@ -1,7 +1,3 @@
-# Compilación automática: en cada push y en cada pull request se compila HyperSpring con
-# local-build/build.sh (el mismo camino que las releases) y se suben los dos APK como artefacto.
-# Sirve para ver errores antes de publicar. Las releases se siguen firmando aparte: estos APK
-# llevan la clave de depuración de uber-apk-signer, como las publicadas.
 name: Build
 
 on:
@@ -22,21 +18,17 @@ jobs:
       APKTOOL_VERSION: "2.10.0"
       SIGNER_VERSION: "1.3.0"
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: '17'
+          distribution: temurin
+          java-version: "17"
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
-      # Las herramientas cambian poco: se guardan en caché entre compilaciones.
       - name: Cache tools
         uses: actions/cache@v4
         with:
@@ -59,13 +51,60 @@ jobs:
             "https://github.com/patrickfav/uber-apk-signer/releases/download/v${SIGNER_VERSION}/uber-apk-signer-${SIGNER_VERSION}.jar"
           ls -la "$TOOLS"
 
-      # build.sh revisa los shaders AGSL si encuentra skia-python y el script en $TOOLS.
       - name: Check AGSL shaders
         run: |
           sudo apt-get update
           sudo apt-get install -y -qq libegl1 libgl1 > /dev/null
           pip install --quiet skia-python
           cp local-build/agsl_check.py "$TOOLS/agsl_check.py"
+
+      # Временный патч: делает Log и Tune доступными из подпакета compat
+      # и добавляет недостающую перегрузку f(Context, String, float).
+      - name: Patch source access modifiers
+        run: |
+          python3 << 'PYEOF'
+          import re
+
+          # --- Log.java: public class Log ---
+          log_path = 'app/src/main/java/com/icehome/up/Log.java'
+          with open(log_path, 'r') as f:
+              content = f.read()
+          content = re.sub(r'^(\s*)class\s+Log\b', r'\1public class Log', content, flags=re.MULTILINE)
+          with open(log_path, 'w') as f:
+              f.write(content)
+          print(f'Patched {log_path}')
+
+          # --- Tune.java: public class Tune, public on(), public f(), + f(ctx,k,def) ---
+          tune_path = 'app/src/main/java/com/icehome/up/Tune.java'
+          with open(tune_path, 'r') as f:
+              content = f.read()
+
+          content = re.sub(r'^(\s*)class\s+Tune\b', r'\1public class Tune', content, flags=re.MULTILINE)
+          content = re.sub(r'(\s)(?:public\s+)?static\s+boolean\s+on\s*\(', r'\1public static boolean on(', content)
+          content = re.sub(r'(\s)(?:public\s+)?static\s+float\s+f\s*\(', r'\1public static float f(', content)
+
+          # Добавить перегрузку f(Context,String,float), если её нет
+          if ', float ' not in content and ',float ' not in content:
+              lines = content.split('\n')
+              insert_at = len(lines)
+              for i in range(len(lines) - 1, -1, -1):
+                  if lines[i].strip() == '}' and not lines[i].startswith(' '):
+                      insert_at = i
+                      break
+              overload = [
+                  '',
+                  '    public static float f(Context c, String k, float defaultValue) {',
+                  '        return f(c, k);',
+                  '    }',
+              ]
+              lines[insert_at:insert_at] = overload
+              content = '\n'.join(lines)
+              print('Added f(Context, String, float) overload')
+
+          with open(tune_path, 'w') as f:
+              f.write(content)
+          print(f'Patched {tune_path}')
+          PYEOF
 
       - name: Build
         run: bash local-build/build.sh
@@ -75,6 +114,6 @@ jobs:
         with:
           name: HyperSpring-${{ github.sha }}
           path: |
-            ${{ github.workspace }}/local-build/out/HyperSpring.apk
-            ${{ github.workspace }}/local-build/out/HyperSpring-legacy.apk
+            local-build/out/HyperSpring.apk
+            local-build/out/HyperSpring-legacy.apk
           if-no-files-found: warn
